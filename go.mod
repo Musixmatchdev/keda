@@ -156,6 +156,8 @@ require (
 	github.com/go-playground/universal-translator v0.18.0 // indirect
 	github.com/gobuffalo/flect v0.2.5 // indirect
 	github.com/gofrs/uuid v4.2.0+incompatible // indirect
+	github.com/go-stack/stack v1.8.0 // indirect
+	github.com/go-stomp/stomp/v3 v3.0.5
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.4.2 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
