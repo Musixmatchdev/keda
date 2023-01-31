@@ -11,14 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/api/autoscaling/v2beta2"
-	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/labels"
+	v2 "k8s.io/api/autoscaling/v2"
+
+	// "k8s.io/apimachinery/pkg/api/resource"
+	// "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	stomp "github.com/go-stomp/stomp/v3"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	// metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -60,6 +61,7 @@ type activeMQStatisticsScalerMetadata struct {
 	password        string
 	destinationName string
 	targetQueueSize int64
+	activationTargetQueueSize int64
 	metricName      string
 	scalerIndex     int
 }
@@ -70,13 +72,14 @@ type activeMQStatisticsConnection struct {
 }
 
 type activeMQStatisticsScaler struct {
-	metricType v2beta2.MetricTargetType
+	metricType v2.MetricTargetType
 	metadata   *activeMQStatisticsScalerMetadata
 	connection *activeMQStatisticsConnection
 }
 
 const (
 	amqsTargetQueueSizeDefault = 10
+	amqsActivationTargetQueueSizeDefault = 0
 	amqsQueuePrefix            = "/queue/ActiveMQ.Statistics.Destination."
 )
 
@@ -143,6 +146,16 @@ func amqsParseMetadata(config *ScalerConfig) (*activeMQStatisticsScalerMetadata,
 		meta.targetQueueSize = queueSize
 	} else {
 		meta.targetQueueSize = amqsTargetQueueSizeDefault
+	}
+
+	if val, ok := config.TriggerMetadata["activationTargetQueueSize"]; ok {
+		activationTargetQueueSize, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid activationTargetQueueSize - must be an integer")
+		}
+		meta.activationTargetQueueSize = activationTargetQueueSize
+	} else {
+		meta.activationTargetQueueSize = amqsActivationTargetQueueSizeDefault
 	}
 
 	if val, ok := config.AuthParams["username"]; ok && val != "" {
@@ -309,40 +322,50 @@ func (s *activeMQStatisticsScaler) GetStatisticsQueueSize(ctx context.Context) (
 	return stats.Size, nil
 }
 
-/*
- * Scaler Interface
- */
-// The scaler returns the metric values for a metric Name and criteria matching the selector
-// GetMetrics returns value for a supported metric and an error if there is a problem getting the metric
-func (s *activeMQStatisticsScaler) GetMetrics(ctx context.Context, metricName string, metricSelector labels.Selector) ([]external_metrics.ExternalMetricValue, error) {
+// Scaler Interface
+//
+// GetMetricsAndActivity
+// This is the key function of a scaler; it returns:
+//
+// A value that represents a current state of an external metric (e.g. length of a queue). The return type is an ExternalMetricValue struct which has the following fields:
+//
+// MetricName: this is the name of the metric that we are returning. The name should be unique, to allow setting multiple (even the same type) Triggers in one ScaledObject, but each function call should return the same name.
+// Timestamp: indicates the time at which the metrics were produced.
+// WindowSeconds: //TODO
+// Value: A numerical value that represents the state of the metric. It could be the length of a queue, or it can be the amount of lag in a stream, but it can also be a simple representation of the state.
+// A value that represents an activity of the scaler. The return type is bool.
+//
+// KEDA polls ScaledObject object according to the pollingInterval configured in the ScaledObject; it checks the last time it was polled, it checks if the number of replicas is greater than 0, and if the scaler itself is active. So if the scaler returns false for IsActive, and if current number of replicas is greater than 0, and there is no configured minimum pods, then KEDA scales down to 0.
+//
+// Kubernetes HPA (Horizontal Pod Autoscaler) will poll GetMetricsAndActivity regularly through KEDA's metric server (as long as there is at least one pod), and compare the returned value to a configured value in the ScaledObject configuration. Kubernetes will use the following formula to decide whether to scale the pods up and down:
+//
+// desiredReplicas = ceil[currentReplicas * ( currentMetricValue / desiredMetricValue )].
+func (s *activeMQStatisticsScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) { 
 	queueSize, err := s.GetStatisticsQueueSize(ctx)
+	
 	if err != nil {
-		return nil, fmt.Errorf("error inspecting ActiveMQ Statistics queue size: %s", err)
+		return []external_metrics.ExternalMetricValue{}, false, fmt.Errorf("error inspecting ActiveMQ Statistics queue size: %s", err)
 	}
-
-	metric := external_metrics.ExternalMetricValue{
-		MetricName: metricName,
-		Value:      *resource.NewQuantity(queueSize, resource.DecimalSI),
-		Timestamp:  metav1.Now(),
-	}
-
-	return []external_metrics.ExternalMetricValue{metric}, nil
+	
+	metric := GenerateMetricInMili(metricName, float64(queueSize))
+	
+	return []external_metrics.ExternalMetricValue{metric}, queueSize > s.metadata.activationTargetQueueSize, nil
 }
 
 // GetMetricSpecForScaling returns the MetricSpec for the Horizontal Pod Autoscaler
 // Returns the metrics based on which this scaler determines that the ScaleTarget scales. This is used to construct the HPA spec that is created for
 // this scaled object. The labels used should match the selectors used in GetMetrics
-func (s *activeMQStatisticsScaler) GetMetricSpecForScaling(context.Context) []v2beta2.MetricSpec {
-	externalMetric := &v2beta2.ExternalMetricSource{
-		Metric: v2beta2.MetricIdentifier{
+func (s *activeMQStatisticsScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
+	externalMetric := &v2.ExternalMetricSource{
+		Metric: v2.MetricIdentifier{
 			Name: s.metadata.metricName,
 		},
 		Target: GetMetricTarget(s.metricType, s.metadata.targetQueueSize),
 	}
-	metricSpec := v2beta2.MetricSpec{
+	metricSpec := v2.MetricSpec{
 		External: externalMetric, Type: externalMetricType,
 	}
-	return []v2beta2.MetricSpec{metricSpec}
+	return []v2.MetricSpec{metricSpec}
 }
 
 // IsActive returns true if there are pending messages to be processed
