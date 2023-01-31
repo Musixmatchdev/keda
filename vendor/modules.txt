@@ -422,6 +422,13 @@ github.com/go-redis/redis/v8/internal/util
 # github.com/go-sql-driver/mysql v1.6.0
 ## explicit; go 1.10
 github.com/go-sql-driver/mysql
+# github.com/go-stack/stack v1.8.0
+## explicit
+# github.com/go-stomp/stomp/v3 v3.0.5
+## explicit; go 1.15
+github.com/go-stomp/stomp/v3
+github.com/go-stomp/stomp/v3/frame
+github.com/go-stomp/stomp/v3/internal/log
 # github.com/gobuffalo/flect v0.2.5
 ## explicit; go 1.13
 github.com/gobuffalo/flect
